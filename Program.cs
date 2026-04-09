@@ -55,6 +55,8 @@ namespace CapsLockRemapper
         // IME guard — keeps Chinese conversion mode sticky when block toggle is on
         private static System.Windows.Forms.Timer _imeGuardTimer = null;
         private const uint IME_CMODE_NATIVE = 0x0001; // Chinese character input mode
+        private static long _suppressGuardUntil = 0;  // epoch tick after which guard resumes
+        private static int _wrongModeCount = 0;        // debounce: consecutive ticks in English mode
 
         [STAThread]
         public static void Main()
@@ -162,7 +164,7 @@ namespace CapsLockRemapper
         {
             if (_imeGuardTimer != null) return;
             _imeGuardTimer = new System.Windows.Forms.Timer();
-            _imeGuardTimer.Interval = 200;
+            _imeGuardTimer.Interval = 400;
             _imeGuardTimer.Tick += ImeGuardTick;
             _imeGuardTimer.Start();
         }
@@ -175,18 +177,31 @@ namespace CapsLockRemapper
             _imeGuardTimer = null;
         }
 
-        // Runs every 200ms: if the foreground window's IME silently dropped out of
+        // Runs every 400ms: if the foreground window's IME silently dropped out of
         // native (Chinese) mode — e.g. due to a tray-click focus round-trip — put it back.
+        // Suppressed briefly after a language switch, and debounced to 2 consecutive ticks
+        // before correcting, to prevent tray indicator flicker.
         private static void ImeGuardTick(object sender, EventArgs e)
         {
+            if (Environment.TickCount < _suppressGuardUntil) return;
+
             IntPtr hwnd = GetForegroundWindow();
-            if (hwnd == IntPtr.Zero) return;
+            if (hwnd == IntPtr.Zero) { _wrongModeCount = 0; return; }
             IntPtr himc = ImmGetContext(hwnd);
-            if (himc == IntPtr.Zero) return;
+            if (himc == IntPtr.Zero) { _wrongModeCount = 0; return; }
             uint conv, sent;
             if (ImmGetConversionStatus(himc, out conv, out sent) && (conv & IME_CMODE_NATIVE) == 0)
             {
-                ImmSetConversionStatus(himc, conv | IME_CMODE_NATIVE, sent);
+                _wrongModeCount++;
+                if (_wrongModeCount >= 2)
+                {
+                    ImmSetConversionStatus(himc, conv | IME_CMODE_NATIVE, sent);
+                    _wrongModeCount = 0;
+                }
+            }
+            else
+            {
+                _wrongModeCount = 0;
             }
             ImmReleaseContext(hwnd, himc);
         }
@@ -266,6 +281,10 @@ namespace CapsLockRemapper
                                 }
                                 else
                                 {
+                                    // Suppress the IME guard for 1.5s so the language-switch
+                                    // animation doesn't race with the guard and cause tray flicker.
+                                    _suppressGuardUntil = Environment.TickCount + 1500;
+                                    _wrongModeCount = 0;
                                     keybd_event((byte)VK_LWIN, 0, 0, UIntPtr.Zero);
                                     keybd_event((byte)VK_SPACE, 0, 0, UIntPtr.Zero);
                                     keybd_event((byte)VK_SPACE, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
